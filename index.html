@@ -88,6 +88,13 @@
   .auth-btn.connected { border-color: var(--accent); color: var(--accent); }
   .auth-btn.connected:hover { border-color: var(--danger); color: var(--danger); }
 
+  .file-status {
+    font-size: 11px;
+    color: var(--muted);
+    font-family: var(--mono);
+  }
+  .file-status.ok { color: var(--accent); }
+
   /* ── sidebar esquerda: prefixos + stats ── */
   .sidebar-left {
     border-right: 1px solid var(--border);
@@ -196,6 +203,52 @@
 
   .focus-input::placeholder { color: var(--muted); font-weight: 400; }
 
+  /* ── tabs ── */
+  .tabs {
+    display: flex;
+    gap: 4px;
+    flex-shrink: 0;
+  }
+
+  .tab {
+    font-family: var(--mono);
+    font-size: 12px;
+    padding: 5px 14px;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 3px;
+    color: var(--muted);
+    cursor: pointer;
+    transition: color 0.15s, border-color 0.15s;
+  }
+
+  .tab:hover { color: var(--text); }
+  .tab.active { color: var(--accent); border-color: var(--accent); }
+
+  /* ── diário ── */
+  .diary-panel {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    padding: 16px 28px;
+    overflow: hidden;
+  }
+
+  .diary-input {
+    flex: 1;
+    background: transparent;
+    border: none;
+    outline: none;
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--text);
+    line-height: 1.8;
+    resize: none;
+    width: 100%;
+  }
+
+  .diary-input::placeholder { color: var(--muted); }
+
   /* ── lista de notas ── */
   .notes-scroll {
     flex: 1;
@@ -219,6 +272,27 @@
   }
 
   .note-sym { width: 18px; text-align: center; flex-shrink: 0; padding-top: 2px; font-size: 14px; }
+
+  .note-prefix-select {
+    width: 24px;
+    background: transparent;
+    border: none;
+    outline: none;
+    font-family: var(--mono);
+    font-size: 14px;
+    cursor: pointer;
+    flex-shrink: 0;
+    padding: 0;
+    appearance: none;
+    -webkit-appearance: none;
+    text-align: center;
+    color: inherit;
+  }
+
+  .note-prefix-select option {
+    background: var(--bg3);
+    color: var(--text);
+  }
   .note-text { flex: 1; font-size: 13px; color: var(--text); line-height: 1.5; word-break: break-word; }
   .note-text.done { text-decoration: line-through; color: var(--muted); }
 
@@ -500,6 +574,7 @@
     padding: 10px 18px;
     border-top: 1px solid var(--border);
     display: flex;
+    flex-wrap: wrap;
     gap: 8px;
   }
 
@@ -563,6 +638,8 @@
     <div class="logo">flat<span>.</span>notes</div>
     <div class="topbar-right">
       <span class="date-display" id="date-display"></span>
+      <span class="file-status" id="file-status"></span>
+      <button class="auth-btn" id="file-btn" onclick="connectJsonFile()">conectar arquivo</button>
       <button class="auth-btn" id="auth-btn" onclick="handleAuth()">conectar google</button>
     </div>
   </header>
@@ -624,7 +701,10 @@
   <!-- área principal -->
   <main class="main">
     <div class="main-header">
-      <span class="main-title">foco do dia</span>
+      <div class="tabs">
+        <button class="tab active" id="tab-notes" onclick="switchTab('notes')">notas</button>
+        <button class="tab" id="tab-diary" onclick="switchTab('diary')">diário</button>
+      </div>
       <div class="focus-input-wrap">
         <span class="focus-sym">!</span>
         <input class="focus-input" id="focus-input" placeholder="uma coisa que precisa sair hoje..." />
@@ -636,7 +716,7 @@
       <div id="notes-list"></div>
     </div>
 
-    <div class="add-note-bar">
+    <div class="add-note-bar" id="add-note-bar">
       <select class="prefix-select" id="prefix-select">
         <option value="-">-  tarefa</option>
         <option value="!">!  prioridade</option>
@@ -648,6 +728,10 @@
       </select>
       <input class="new-note-input" id="new-note-input" placeholder="nova nota... (enter para adicionar)" />
       <button class="add-note-btn" onclick="addNote()">+ add</button>
+    </div>
+
+    <div class="diary-panel" id="diary-panel" style="display:none">
+      <textarea class="diary-input" id="diary-input" placeholder="escreva aqui..."></textarea>
     </div>
   </main>
 
@@ -664,8 +748,11 @@
     </div>
     <div class="export-bar">
       <button class="export-btn" onclick="exportMd()">exportar .md</button>
+      <button class="export-btn" onclick="exportJson()">exportar .json</button>
+      <button class="export-btn" onclick="importJson()">importar .json</button>
       <button class="export-btn" onclick="clearDay()">limpar dia</button>
     </div>
+    <input type="file" id="json-import-input" accept=".json" style="display:none" onchange="handleJsonImport(event)" />
   </aside>
 
 </div>
@@ -693,10 +780,113 @@
   const SCOPES = 'https://www.googleapis.com/auth/calendar.readonly';
   const STORAGE_KEY = 'flat_notes_data';
 
+  /* ── file system access ── */
+  let fileHandle = null;
+
+  function openDb() {
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open('flat_notes_db', 1);
+      req.onupgradeneeded = e => e.target.result.createObjectStore('handles');
+      req.onsuccess = e => resolve(e.target.result);
+      req.onerror = () => reject();
+    });
+  }
+
+  async function saveHandleToDb(handle) {
+    const db = await openDb();
+    return new Promise(resolve => {
+      const tx = db.transaction('handles', 'readwrite');
+      tx.objectStore('handles').put(handle, 'notes');
+      tx.oncomplete = resolve;
+    });
+  }
+
+  async function loadHandleFromDb() {
+    const db = await openDb();
+    return new Promise(resolve => {
+      const tx = db.transaction('handles', 'readonly');
+      const req = tx.objectStore('handles').get('notes');
+      req.onsuccess = e => resolve(e.target.result || null);
+      req.onerror = () => resolve(null);
+    });
+  }
+
+  async function connectJsonFile() {
+    if (fileHandle) {
+      fileHandle = null;
+      await saveHandleToDb(null).catch(() => {});
+      updateFileStatus(null);
+      showToast('arquivo desconectado');
+      return;
+    }
+    if (!window.showSaveFilePicker) {
+      showToast('seu navegador não suporta File System Access API');
+      return;
+    }
+    try {
+      const handle = await window.showSaveFilePicker({
+        suggestedName: 'flat-notes.json',
+        types: [{ description: 'JSON', accept: { 'application/json': ['.json'] } }],
+      });
+      fileHandle = handle;
+      await saveHandleToDb(handle);
+      await writeJsonFile();
+      updateFileStatus(handle);
+      showToast('arquivo conectado: ' + handle.name);
+    } catch(e) {
+      if (e.name !== 'AbortError') showToast('erro ao conectar arquivo');
+    }
+  }
+
+  async function writeJsonFile() {
+    if (!fileHandle) return;
+    try {
+      const perm = await fileHandle.requestPermission({ mode: 'readwrite' });
+      if (perm !== 'granted') return;
+      const raw = localStorage.getItem(STORAGE_KEY);
+      const all = raw ? JSON.parse(raw) : {};
+      const { _auth, ...data } = all;
+      const writable = await fileHandle.createWritable();
+      await writable.write(JSON.stringify(data, null, 2));
+      await writable.close();
+    } catch(e) {}
+  }
+
+  function updateFileStatus(handle) {
+    const el = document.getElementById('file-status');
+    const btn = document.getElementById('file-btn');
+    if (handle) {
+      el.textContent = handle.name;
+      el.classList.add('ok');
+      btn.textContent = 'desconectar arquivo';
+      btn.classList.add('connected');
+    } else {
+      el.textContent = '';
+      el.classList.remove('ok');
+      btn.textContent = 'conectar arquivo';
+      btn.classList.remove('connected');
+    }
+  }
+
+  async function initFileHandle() {
+    try {
+      const handle = await loadHandleFromDb();
+      if (!handle) return;
+      const perm = await handle.queryPermission({ mode: 'readwrite' });
+      if (perm === 'granted') {
+        fileHandle = handle;
+        updateFileStatus(handle);
+      } else {
+        updateFileStatus(null);
+      }
+    } catch(e) {}
+  }
+
   /* ── state ── */
   let state = {
     focus: '',
     notes: [],
+    diary: '',
     filter: 'all',
     calEvents: [],
     isConnected: false,
@@ -713,6 +903,7 @@
     updateDateDisplay();
     renderAll();
     handleOAuthCallback();
+    initFileHandle();
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
       if (raw) renderHistory(JSON.parse(raw));
@@ -725,6 +916,12 @@
       saveState();
     });
     document.getElementById('focus-input').value = state.focus || '';
+
+    document.getElementById('diary-input').value = state.diary || '';
+    document.getElementById('diary-input').addEventListener('input', e => {
+      state.diary = e.target.value;
+      saveState();
+    });
 
     if (state.accessToken && state.tokenExpiry && Date.now() < state.tokenExpiry) {
       state.isConnected = true;
@@ -758,6 +955,7 @@
       if (all[today]) {
         state.focus = all[today].focus || '';
         state.notes = all[today].notes || [];
+        state.diary = all[today].diary || '';
       }
       if (all._auth) {
         state.accessToken = all._auth.token;
@@ -771,12 +969,13 @@
       const raw = localStorage.getItem(STORAGE_KEY);
       const all = raw ? JSON.parse(raw) : {};
       const today = todayKey();
-      all[today] = { focus: state.focus, notes: state.notes };
+      all[today] = { focus: state.focus, notes: state.notes, diary: state.diary };
       if (state.accessToken) {
         all._auth = { token: state.accessToken, expiry: state.tokenExpiry };
       }
       localStorage.setItem(STORAGE_KEY, JSON.stringify(all));
       renderHistory(all);
+      writeJsonFile();
     } catch(e) {}
   }
 
@@ -805,7 +1004,9 @@
       if (!all[dateKey]) return;
       state.focus = all[dateKey].focus || '';
       state.notes = all[dateKey].notes || [];
+      state.diary = all[dateKey].diary || '';
       document.getElementById('focus-input').value = state.focus;
+      document.getElementById('diary-input').value = state.diary;
       renderAll();
       showToast(`visualizando ${dateKey}`);
     } catch(e) {}
@@ -941,6 +1142,11 @@
     input.focus();
   }
 
+  function changePrefix(id, newPrefix) {
+    const n = state.notes.find(n => n.id === id);
+    if (n) { n.prefix = newPrefix; saveState(); renderAll(); }
+  }
+
   function toggleDone(id) {
     const n = state.notes.find(n => n.id === id);
     if (n) { n.done = !n.done; saveState(); renderAll(); }
@@ -1011,6 +1217,16 @@
     modalSelectedEventId = null;
   }
 
+  /* ── tabs ── */
+  function switchTab(tab) {
+    const isNotes = tab === 'notes';
+    document.getElementById('notes-scroll').style.display = isNotes ? '' : 'none';
+    document.getElementById('add-note-bar').style.display = isNotes ? '' : 'none';
+    document.getElementById('diary-panel').style.display = isNotes ? 'none' : 'flex';
+    document.getElementById('tab-notes').classList.toggle('active', isNotes);
+    document.getElementById('tab-diary').classList.toggle('active', !isNotes);
+  }
+
   /* ── filtros ── */
   function setFilter(f) {
     state.filter = f;
@@ -1043,9 +1259,12 @@
     list.innerHTML = filtered.map(n => {
       const ev = n.eventId ? state.calEvents.find(e => e.id === n.eventId) : null;
       const sym = getPrefixSym(n.prefix);
+      const prefixOptions = ['!','-','~','@','>','?','*'].map(p =>
+        `<option value="${p}" ${p === n.prefix ? 'selected' : ''}>${p}</option>`
+      ).join('');
       return `
         <div class="note-row">
-          <span class="note-sym ${sym.cls}">${n.prefix}</span>
+          <select class="note-prefix-select ${sym.cls}" onchange="changePrefix(${n.id}, this.value)" title="mudar tipo">${prefixOptions}</select>
           <span class="note-text ${n.done ? 'done' : ''}" onclick="toggleDone(${n.id})">${escHtml(n.text)}</span>
           ${ev ? `<span class="note-event-tag" title="${escHtml(ev.name)}" onclick="openLinkModal(${n.id})">${escHtml(ev.name)}</span>` : ''}
           <div class="note-actions">
@@ -1072,6 +1291,45 @@
   }
 
   /* ── export ── */
+  function exportJson() {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      const all = raw ? JSON.parse(raw) : {};
+      const { _auth, ...data } = all;
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'flat-notes.json';
+      a.click();
+      showToast('JSON exportado');
+    } catch(e) { showToast('erro ao exportar'); }
+  }
+
+  function importJson() {
+    document.getElementById('json-import-input').click();
+  }
+
+  function handleJsonImport(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const imported = JSON.parse(ev.target.result);
+        const raw = localStorage.getItem(STORAGE_KEY);
+        const current = raw ? JSON.parse(raw) : {};
+        const merged = { ...current, ...imported };
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(merged));
+        loadState();
+        renderAll();
+        renderHistory(merged);
+        showToast('dados importados com sucesso');
+      } catch(e) { showToast('erro ao importar JSON'); }
+      e.target.value = '';
+    };
+    reader.readAsText(file);
+  }
+
   function exportMd() {
     const date = todayKey();
     let md = `# ${date}\n\n`;
@@ -1098,7 +1356,9 @@
     if (!confirm('limpar todas as notas de hoje?')) return;
     state.notes = [];
     state.focus = '';
+    state.diary = '';
     document.getElementById('focus-input').value = '';
+    document.getElementById('diary-input').value = '';
     saveState();
     renderAll();
     showToast('dia limpo');
